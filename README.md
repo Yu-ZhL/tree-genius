@@ -26,17 +26,25 @@ TreeGenius 是一个运行在浏览器端的、高性能的目录树生成工具
 如果你想在本地运行或修改这个项目：
 
 1. 克隆仓库
- `git clone [https://github.com/yu-zhl/tree-genius.git](https://github.com/yu-zhl/tree-genius.git)
-cd tree-genius`
+    ~~~ 
+    git clone [https://github.com/yu-zhl/tree-genius.git](https://github.com/yu-zhl/tree-genius.git)
+    cd tree-genius 
+    ~~~ 
 
 2. 安装依赖
-`npm install`
+    ~~~ 
+    `npm install`
+    ~~~ 
 
 3. 启动开发服务器
-`npm run dev`
+    ~~~ 
+    `npm run dev`
+    ~~~ 
 
 4. 构建部署
-`npm run build`
+    ~~~ 
+    `npm run build`
+    ~~~ 
 
 ## 📝 使用指南
 1. **导入项目：** 点击左上角的虚线框，选择你的项目根文件夹。
