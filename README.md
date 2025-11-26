@@ -1,16 +1,56 @@
-# React + Vite
+## TreeGenius - 目录结构生成神器
+TreeGenius 是一个运行在浏览器端的、高性能的目录树生成工具。它可以瞬间将你的本地项目文件夹转换为美观的文本树状结构，方便你在编写 README.md、技术文档或进行代码审查时使用。 
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+## ✨ 核心特性
+- **🔒 隐私安全：** 利用浏览器原生 API 仅在本地读取文件元数据，绝不上传任何文件内容到服务器。
+- **🚀 极速性能：** 采用异步分块渲染算法，支持包含数万个文件的超大项目（如 node_modules），并支持中途打断。
+- **🎨 多种风格：**
+  - **Classic:** 经典的 ├── 树形结构
+  - **ASCII:** 纯字符兼容模式 |--
+  - **Indent:** 纯缩进模式
+  - **Emoji:** 带图标的可爱模式 📁 📄
+  - **JSON:** 导出机器可读格式
+- **🛠- ️ 强大配置：**
+  - 实时过滤/排除文件夹（支持 node_modules, .git 等预设）
+  - 控制递归深度
+  - 显示/隐藏文件大小
+  - 显示/隐藏统计信息
+  💾 自动保存：你的配置偏好（排除项、格式选择等）会自动保存到本地，刷新页面不丢失。
 
-Currently, two official plugins are available:
+## 🖥️ 在线使用
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+访问 GitHub Pages: https://yu-zhl.github.io/tree-genius/
 
-## React Compiler
+## 📦 本地开发
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+如果你想在本地运行或修改这个项目：
 
-## Expanding the ESLint configuration
+1. 克隆仓库
+ `git clone [https://github.com/yu-zhl/tree-genius.git](https://github.com/yu-zhl/tree-genius.git)
+cd tree-genius`
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+2. 安装依赖
+`npm install`
+
+3. 启动开发服务器
+`npm run dev`
+
+4. 构建部署
+`npm run build`
+
+## 📝 使用指南
+1. **导入项目：** 点击左上角的虚线框，选择你的项目根文件夹。
+2. 调整视图：
+   - 在左侧面板切换 "Classic" 或 "Indent" 等风格。
+   - 拖动深度滑块来折叠深层目录。
+   - 开启 "显示大小" 查看各文件占用空间。
+   - 排除干扰：在 "排除名单" 输入框中输入文件夹名（如 test）并回车，即刻隐藏不想看到的内容。
+4. **导出：**
+点击右上角的 复制 按钮直接粘贴到文档。
+点击 下载 按钮保存为 .txt 文件。
+
+## 🤝 贡献
+欢迎提交 Issue 或 Pull Request 来改进这个工具！
+
+## 📄 License
+MIT License

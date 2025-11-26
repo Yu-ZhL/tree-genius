@@ -1,36 +1,18 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-    Folder,
-    FileText,
-    Copy,
-    Settings,
-    Trash2,
-    Plus,
-    History,
-    Download,
-    RefreshCw,
-    ChevronRight,
-    ChevronDown,
-    Layers,
-    Code
+    Folder, FileText, Copy, Settings, Trash2, Plus,
+    Download, RefreshCw, Layers, Code, Play, Square,
+    Loader2, HardDrive, FileJson
 } from 'lucide-react';
 
-// --- 工具函数 ---
+// --- 常量定义 ---
 
-// 默认排除列表
 const DEFAULT_IGNORES = [
-    'node_modules',
-    '.git',
-    '.idea',
-    '.vscode',
-    'dist',
-    'build',
-    'coverage',
-    '__pycache__',
-    '.DS_Store'
+    'node_modules', '.git', '.idea', '.vscode', 'dist',
+    'build', 'coverage', '__pycache__', '.DS_Store'
 ];
 
-// 树的样式定义
+// 样式定义
 const TREE_STYLES = {
     classic: {
         branch: '├── ',
@@ -47,246 +29,333 @@ const TREE_STYLES = {
     minimal: {
         branch: '+ ',
         lastBranch: '+ ',
-        vertical: '  ',
+        vertical: '  ', // 使用空格保持层级
         space: '  '
     },
     indent: {
-        branch: '',
-        lastBranch: '',
-        vertical: '',
+        branch: '  ',
+        lastBranch: '  ',
+        vertical: '  ', // 关键修复：即使没有连接线，也需要空格占位来体现缩进
         space: '  '
+    },
+    emoji: {
+        branch: '├── ',
+        lastBranch: '└── ',
+        vertical: '│   ',
+        space: '    ',
+        folderIcon: '📁 ',
+        fileIcon: '📄 '
     }
+};
+
+// 格式化文件大小
+const formatSize = (bytes) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
 export default function App() {
     // --- State ---
-    const [files, setFiles] = useState([]);
+    const [fileList, setFileList] = useState([]); // 存储原始 File 对象数组
     const [rootName, setRootName] = useState('project-root');
+
+    // 生成结果 State
     const [generatedTree, setGeneratedTree] = useState('');
+    const [stats, setStats] = useState({ dirs: 0, files: 0, totalSize: 0 });
+    const [isGenerating, setIsGenerating] = useState(false);
     const [isCopied, setIsCopied] = useState(false);
 
-    // 配置 State
-    const [config, setConfig] = useState({
-        maxDepth: 10,
-        style: 'classic', // classic, ascii, minimal, indent, json
-        ignores: [...DEFAULT_IGNORES],
-        showFiles: true,
-        showIcons: true, // 仅影响预览，不影响生成的文本
-        trailingSlash: false, // 文件夹后是否加 /
+    // 这里的 Ref 用于中断生成过程
+    const abortControllerRef = useRef(null);
+
+    // --- 配置 State (带持久化) ---
+    const [config, setConfig] = useState(() => {
+        // 初始加载时读取 localStorage
+        const saved = localStorage.getItem('tree-genius-config-v2');
+        return saved ? JSON.parse(saved) : {
+            maxDepth: 10,
+            style: 'classic',
+            ignores: [...DEFAULT_IGNORES],
+            showFiles: true,
+            showSizes: false, // 新功能：显示大小
+            trailingSlash: false,
+            showStats: true   // 新功能：显示统计信息
+        };
     });
 
     const [ignoreInput, setIgnoreInput] = useState('');
-    const [isSettingsOpen, setIsSettingsOpen] = useState(true); // 移动端默认折叠可能更好，这里桌面端默认展开
 
     // --- Effects ---
 
-    // 从 LocalStorage 加载配置
+    // 1. 自动保存配置
     useEffect(() => {
-        const savedConfig = localStorage.getItem('tree-genius-config');
-        if (savedConfig) {
-            try {
-                const parsed = JSON.parse(savedConfig);
-                // 合并配置，防止新版本缺少字段
-                setConfig(prev => ({ ...prev, ...parsed }));
-            } catch (e) {
-                console.error("Failed to load config", e);
-            }
-        }
-    }, []);
-
-    // 保存配置到 LocalStorage
-    useEffect(() => {
-        localStorage.setItem('tree-genius-config', JSON.stringify(config));
+        localStorage.setItem('tree-genius-config-v2', JSON.stringify(config));
     }, [config]);
 
-    // --- 核心逻辑：处理文件输入 ---
+    // 2. 核心生成逻辑触发器
+    useEffect(() => {
+        if (fileList.length === 0) return;
 
-    const handleFolderSelect = (e) => {
-        const fileList = e.target.files;
-        if (!fileList || fileList.length === 0) return;
+        // 使用防抖或简单的异步调用来避免阻塞 UI，并支持取消
+        const generate = async () => {
+            // 如果有正在进行的任务，先取消
+            if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+            }
 
-        // 获取根文件夹名称 (取第一个文件的路径的第一部分)
-        // webkitRelativePath 格式通常是 "FolderName/subfolder/file.txt"
-        const firstPath = fileList[0].webkitRelativePath;
-        const root = firstPath.split('/')[0];
-        setRootName(root);
+            const controller = new AbortController();
+            abortControllerRef.current = controller;
+            const signal = controller.signal;
 
-        const paths = [];
-        for (let i = 0; i < fileList.length; i++) {
-            paths.push(fileList[i].webkitRelativePath);
-        }
-        setFiles(paths);
-    };
+            setIsGenerating(true);
 
-    // --- 核心逻辑：构建树结构 ---
+            try {
+                // 模拟让出主线程，允许 UI 渲染 "Loading" 状态
+                await new Promise(resolve => setTimeout(resolve, 10));
 
-    // 1. 将路径数组转换为嵌套对象
-    const buildFileTree = (paths) => {
+                if (signal.aborted) return;
+
+                // 开始构建
+                const { treeString, statistics } = await buildTreeAsync(fileList, config, rootName, signal);
+
+                if (!signal.aborted) {
+                    setGeneratedTree(treeString);
+                    setStats(statistics);
+                }
+            } catch (err) {
+                if (err.message !== 'Aborted') {
+                    console.error("Tree generation failed:", err);
+                    setGeneratedTree(`Error: ${err.message}`);
+                }
+            } finally {
+                if (!signal.aborted) {
+                    setIsGenerating(false);
+                    abortControllerRef.current = null;
+                }
+            }
+        };
+
+        generate();
+
+        return () => {
+            if (abortControllerRef.current) abortControllerRef.current.abort();
+        };
+    }, [fileList, config, rootName]);
+
+
+    // --- 逻辑函数 ---
+
+    // 异步构建树（模拟耗时操作）
+    const buildTreeAsync = async (files, cfg, root, signal) => {
+        // 1. 预处理：构建路径映射对象
         const tree = {};
+        const stats = { dirs: 0, files: 0, totalSize: 0 };
 
-        paths.forEach(path => {
+        // 为了不阻塞，我们每处理一定数量的文件就 yield 一次
+        const CHUNK_SIZE = 2000;
+
+        for (let i = 0; i < files.length; i++) {
+            if (i % CHUNK_SIZE === 0) {
+                await new Promise(r => setTimeout(r, 0)); // Yield to main thread
+                if (signal.aborted) throw new Error('Aborted');
+            }
+
+            const file = files[i];
+            const path = file.webkitRelativePath || file.name;
             const parts = path.split('/');
-            // 移除第一层（根目录名），因为我们通常从根目录内部开始展示
-            // 但如果用户上传的是多个文件而非文件夹，这里的逻辑可能需要调整。
-            // 对于 webkitdirectory，parts[0] 总是文件夹名。
+            // parts[0] 是根文件夹名，通常不包含在树的子节点里，但 webkitRelativePath 包含它
             const relevantParts = parts.slice(1);
 
-            // 过滤逻辑 (Pre-filter)
-            // 如果路径中任何一部分在 ignores 列表中，则丢弃该路径
-            const shouldIgnore = relevantParts.some(part => config.ignores.includes(part));
-            if (shouldIgnore) return;
+            // 过滤
+            if (relevantParts.some(part => cfg.ignores.includes(part))) continue;
 
             let currentLevel = tree;
             relevantParts.forEach((part, index) => {
+                const isFile = index === relevantParts.length - 1;
+
                 if (!currentLevel[part]) {
-                    currentLevel[part] = index === relevantParts.length - 1 ? null : {};
+                    if (isFile) {
+                        currentLevel[part] = { _type: 'file', size: file.size };
+                        stats.files++;
+                        stats.totalSize += file.size;
+                    } else {
+                        currentLevel[part] = { _type: 'dir', _children: {} };
+                        stats.dirs++;
+                    }
                 }
-                currentLevel = currentLevel[part];
+
+                if (!isFile) {
+                    currentLevel = currentLevel[part]._children;
+                }
             });
-        });
-        return tree;
+        }
+
+        // 2. 渲染字符串
+        let resultString = '';
+
+        if (cfg.style === 'json') {
+            resultString = JSON.stringify(tree, null, 2);
+        } else {
+            const rootLabel = cfg.trailingSlash ? `${root}/` : root;
+            const rootSizeInfo = cfg.showSizes ? ` (${formatSize(stats.totalSize)})` : '';
+
+            // 只有在非 indent 模式或者 indent 模式下第一行通常也显示根
+            resultString = `${rootLabel}${rootSizeInfo}\n`;
+            resultString += await renderNodes(tree, '', 0, cfg, signal);
+        }
+
+        return { treeString: resultString, statistics: stats };
     };
 
-    // 2. 将嵌套对象递归渲染为字符串
-    const renderTreeString = (tree, prefix = '', depth = 0) => {
-        if (depth >= config.maxDepth) return '';
-
-        // JSON 模式单独处理
-        if (config.style === 'json') return '';
+    const renderNodes = async (nodes, prefix, depth, cfg, signal) => {
+        if (depth >= cfg.maxDepth) return '';
+        if (signal.aborted) throw new Error('Aborted');
 
         let output = '';
-        const keys = Object.keys(tree).sort((a, b) => {
-            // 文件夹排在文件前面
-            const aIsFolder = tree[a] !== null;
-            const bIsFolder = tree[b] !== null;
-            if (aIsFolder && !bIsFolder) return -1;
-            if (!aIsFolder && bIsFolder) return 1;
-            return a.localeCompare(b);
+        const entries = Object.entries(nodes).sort((a, b) => {
+            // 文件夹排前面
+            const aIsDir = a[1]._type === 'dir';
+            const bIsDir = b[1]._type === 'dir';
+            if (aIsDir && !bIsDir) return -1;
+            if (!aIsDir && bIsDir) return 1;
+            return a[0].localeCompare(b[0]);
         });
 
-        const style = TREE_STYLES[config.style] || TREE_STYLES.classic;
+        const style = TREE_STYLES[cfg.style] || TREE_STYLES.classic;
 
-        keys.forEach((key, index) => {
-            const isLast = index === keys.length - 1;
-            const isFolder = tree[key] !== null;
+        for (let i = 0; i < entries.length; i++) {
+            // 定期 yield 防止大树渲染卡死
+            if (i % 500 === 0) await new Promise(r => setTimeout(r, 0));
 
-            // 如果不显示文件且当前是文件，跳过
-            if (!config.showFiles && !isFolder) return;
+            const [name, data] = entries[i];
+            const isLast = i === entries.length - 1;
+            const isDir = data._type === 'dir';
 
-            const connector = isLast ? style.lastBranch : style.branch;
+            if (!cfg.showFiles && !isDir) continue;
 
-            let lineName = key;
-            if (isFolder && config.trailingSlash) lineName += '/';
+            // 准备前缀和连接符
+            let connector = isLast ? style.lastBranch : style.branch;
 
-            output += `${prefix}${connector}${lineName}\n`;
-
-            if (isFolder) {
-                const nextPrefix = prefix + (isLast ? style.space : style.vertical);
-                output += renderTreeString(tree[key], nextPrefix, depth + 1);
+            // Emoji 风格特殊处理
+            let icon = '';
+            if (cfg.style === 'emoji') {
+                icon = isDir ? style.folderIcon : style.fileIcon;
             }
-        });
+
+            let lineContent = name;
+            if (isDir && cfg.trailingSlash) lineContent += '/';
+
+            // 添加大小信息
+            if (cfg.showSizes && !isDir) {
+                lineContent += ` (${formatSize(data.size)})`;
+            }
+
+            output += `${prefix}${connector}${icon}${lineContent}\n`;
+
+            if (isDir) {
+                const nextPrefix = prefix + (isLast ? style.space : style.vertical);
+                output += await renderNodes(data._children, nextPrefix, depth + 1, cfg, signal);
+            }
+        }
 
         return output;
     };
 
-    // 3. 将嵌套对象转换为 JSON 字符串
-    const renderJsonString = (tree) => {
-        // 简单的递归转换，为了美观可以做更多处理
-        return JSON.stringify(tree, null, 2);
+    // --- 事件处理 ---
+
+    const handleFolderSelect = (e) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+
+        // 转换为数组以便后续处理
+        const fileArray = Array.from(files);
+        setFileList(fileArray);
+
+        const firstPath = fileArray[0].webkitRelativePath;
+        if (firstPath) {
+            setRootName(firstPath.split('/')[0]);
+        }
     };
 
-    // 使用 useMemo 优化性能，只有当文件列表或配置改变时才重新计算
-    useEffect(() => {
-        if (files.length === 0) return;
-
-        const treeObj = buildFileTree(files);
-
-        let resultString = '';
-
-        if (config.style === 'json') {
-            resultString = renderJsonString(treeObj);
-        } else {
-            // 添加根目录
-            const rootDisplay = config.trailingSlash ? `${rootName}/` : rootName;
-            resultString = `${rootDisplay}\n` + renderTreeString(treeObj);
+    const stopGeneration = () => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+            setIsGenerating(false);
+            setGeneratedTree(prev => prev + '\n\n[已手动终止生成]');
         }
-
-        setGeneratedTree(resultString);
-    }, [files, config, rootName]);
-
-
-    // --- 交互处理 ---
+    };
 
     const copyToClipboard = () => {
-        // 使用 execCommand 作为 fallback 或直接使用 navigator
         const textArea = document.createElement("textarea");
         textArea.value = generatedTree;
         document.body.appendChild(textArea);
         textArea.select();
         document.execCommand("copy");
         document.body.removeChild(textArea);
-
         setIsCopied(true);
         setTimeout(() => setIsCopied(false), 2000);
     };
 
-    const addIgnore = () => {
-        if (ignoreInput && !config.ignores.includes(ignoreInput)) {
-            setConfig(prev => ({
-                ...prev,
-                ignores: [...prev.ignores, ignoreInput]
-            }));
-            setIgnoreInput('');
-        }
+    const downloadFile = () => {
+        const blob = new Blob([generatedTree], { type: "text/plain" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${rootName}_tree.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     };
 
-    const removeIgnore = (item) => {
-        setConfig(prev => ({
-            ...prev,
-            ignores: prev.ignores.filter(i => i !== item)
-        }));
-    };
-
-    const handleKeyDown = (e) => {
-        if (e.key === 'Enter') addIgnore();
-    };
-
-    const clearHistory = () => {
-        if(confirm('确定恢复默认设置吗？')) {
+    const resetConfig = () => {
+        if (confirm('恢复默认设置？')) {
             setConfig({
-                maxDepth: 10,
-                style: 'classic',
-                ignores: [...DEFAULT_IGNORES],
-                showFiles: true,
-                showIcons: true,
-                trailingSlash: false,
+                maxDepth: 10, style: 'classic', ignores: [...DEFAULT_IGNORES],
+                showFiles: true, showSizes: false, trailingSlash: false, showStats: true
             });
-            localStorage.removeItem('tree-genius-config');
+            localStorage.removeItem('tree-genius-config-v2');
         }
     };
+
+    // 辅助组件：开关
+    const Toggle = ({ label, checked, onChange }) => (
+        <div className="flex items-center justify-between py-1">
+            <span className="text-sm text-slate-600">{label}</span>
+            <button
+                onClick={() => onChange(!checked)}
+                className={`relative w-10 h-5 rounded-full transition-colors ${checked ? 'bg-blue-600' : 'bg-slate-300'}`}
+            >
+                <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${checked ? 'translate-x-5' : ''}`} />
+            </button>
+        </div>
+    );
 
     return (
-        <div className="min-h-screen bg-slate-50 text-slate-800 font-sans flex flex-col md:flex-row">
+        <div className="h-screen bg-slate-50 text-slate-800 font-sans flex flex-col md:flex-row overflow-hidden">
 
-            {/* 左侧控制面板 */}
-            <div className="w-full md:w-80 lg:w-96 bg-white border-r border-slate-200 flex flex-col h-screen overflow-hidden shadow-lg z-10">
+            {/* 左侧控制栏 */}
+            <div className="w-full md:w-80 flex-shrink-0 bg-white border-r border-slate-200 flex flex-col h-full z-20 shadow-lg">
                 {/* Header */}
-                <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-gradient-to-r from-blue-600 to-blue-700 text-white">
-                    <div className="flex items-center gap-2">
-                        <Layers size={24} />
-                        <h1 className="font-bold text-xl tracking-tight">TreeGenius</h1>
+                <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-blue-700 to-indigo-800 text-white flex justify-between items-center">
+                    <div className="flex items-center gap-2 font-bold text-lg">
+                        <Layers className="text-blue-200" size={20} />
+                        TreeGenius <span className="text-xs bg-white/20 px-1.5 rounded font-normal">PRO</span>
                     </div>
-                    <div className="text-xs bg-blue-800 px-2 py-0.5 rounded opacity-80">v1.0</div>
+                    <button onClick={resetConfig} title="重置设置" className="hover:bg-white/10 p-1 rounded">
+                        <RefreshCw size={14} />
+                    </button>
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-5 space-y-8">
+                <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
 
-                    {/* 1. 文件选择区域 */}
-                    <div className="space-y-3">
-                        <label className="block text-sm font-semibold text-slate-700 uppercase tracking-wider">
-                            1. 选择项目文件夹
-                        </label>
-                        <div className="relative group">
+                    {/* 1. 文件导入 */}
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">项目导入</label>
+                        <div className="relative group cursor-pointer">
                             <input
                                 type="file"
                                 webkitdirectory=""
@@ -295,48 +364,36 @@ export default function App() {
                                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
                                 onChange={handleFolderSelect}
                             />
-                            <div className="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center transition-all group-hover:border-blue-500 group-hover:bg-blue-50">
-                                <div className="flex justify-center mb-2">
-                                    <Folder size={32} className="text-blue-500" />
-                                </div>
-                                <p className="text-sm font-medium text-slate-600 group-hover:text-blue-600">
-                                    点击选择文件夹
-                                </p>
-                                <p className="text-xs text-slate-400 mt-1">
-                                    (数据仅在本地处理，不会上传)
-                                </p>
+                            <div className="border-2 border-dashed border-blue-200 bg-blue-50/50 rounded-xl p-4 text-center group-hover:bg-blue-50 group-hover:border-blue-400 transition-all">
+                                <Folder className="mx-auto text-blue-500 mb-2" size={24} />
+                                <p className="text-sm font-medium text-blue-700">点击选择文件夹</p>
+                                {fileList.length > 0 ? (
+                                    <p className="text-xs text-green-600 mt-1 font-mono">已载入 {rootName}</p>
+                                ) : (
+                                    <p className="text-xs text-slate-400 mt-1">支持拖拽或点击</p>
+                                )}
                             </div>
                         </div>
-                        {files.length > 0 && (
-                            <div className="flex items-center justify-between text-xs text-green-600 bg-green-50 px-3 py-2 rounded-md border border-green-100">
-                                <span>已加载: {rootName}</span>
-                                <span className="font-bold">{files.length} 个文件</span>
-                            </div>
-                        )}
                     </div>
 
-                    {/* 2. 格式设置 */}
-                    <div className="space-y-4">
-                        <div className="flex items-center justify-between">
-                            <label className="block text-sm font-semibold text-slate-700 uppercase tracking-wider">
-                                2. 展示格式
-                            </label>
-                        </div>
-
+                    {/* 2. 核心设置 */}
+                    <div className="space-y-3">
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">展示风格</label>
                         <div className="grid grid-cols-2 gap-2">
                             {[
-                                { id: 'classic', label: '标准树 (Classic)' },
-                                { id: 'ascii', label: 'ASCII 纯文本' },
-                                { id: 'minimal', label: '极简 (+ / -)' },
+                                { id: 'classic', label: '标准树' },
                                 { id: 'indent', label: '仅缩进' },
-                                { id: 'json', label: 'JSON 格式' }
+                                { id: 'ascii', label: 'ASCII' },
+                                { id: 'minimal', label: '极简' },
+                                { id: 'emoji', label: 'Emoji' },
+                                { id: 'json', label: 'JSON' }
                             ].map(opt => (
                                 <button
                                     key={opt.id}
-                                    onClick={() => setConfig(c => ({ ...c, style: opt.id }))}
-                                    className={`text-sm py-2 px-3 rounded-md border text-left transition-all ${
+                                    onClick={() => setConfig({ ...config, style: opt.id })}
+                                    className={`text-xs py-2 px-2 rounded border transition-all ${
                                         config.style === opt.id
-                                            ? 'bg-blue-600 text-white border-blue-600 shadow-md'
+                                            ? 'bg-blue-600 text-white border-blue-600'
                                             : 'bg-white text-slate-600 border-slate-200 hover:border-blue-300'
                                     }`}
                                 >
@@ -345,80 +402,52 @@ export default function App() {
                             ))}
                         </div>
 
-                        <div className="space-y-3 pt-2">
-                            {/* 深度滑块 */}
-                            <div className="space-y-1">
-                                <div className="flex justify-between text-sm">
-                                    <span className="text-slate-600">显示深度</span>
-                                    <span className="font-mono font-bold text-blue-600">{config.maxDepth} 层</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="1"
-                                    max="20"
-                                    step="1"
-                                    value={config.maxDepth}
-                                    onChange={(e) => setConfig(c => ({ ...c, maxDepth: parseInt(e.target.value) }))}
-                                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                                />
+                        <div className="pt-2">
+                            <div className="flex justify-between text-xs text-slate-500 mb-1">
+                                <span>深度限制</span>
+                                <span>{config.maxDepth} 层</span>
                             </div>
-
-                            {/* 开关选项 */}
-                            <div className="flex items-center justify-between">
-                                <span className="text-sm text-slate-600">显示文件名</span>
-                                <button
-                                    onClick={() => setConfig(c => ({ ...c, showFiles: !c.showFiles }))}
-                                    className={`w-11 h-6 flex items-center rounded-full p-1 transition-colors ${config.showFiles ? 'bg-blue-600' : 'bg-slate-300'}`}
-                                >
-                                    <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform ${config.showFiles ? 'translate-x-5' : ''}`} />
-                                </button>
-                            </div>
-
-                            <div className="flex items-center justify-between">
-                                <span className="text-sm text-slate-600">文件夹尾部斜杠 (/)</span>
-                                <button
-                                    onClick={() => setConfig(c => ({ ...c, trailingSlash: !c.trailingSlash }))}
-                                    className={`w-11 h-6 flex items-center rounded-full p-1 transition-colors ${config.trailingSlash ? 'bg-blue-600' : 'bg-slate-300'}`}
-                                >
-                                    <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform ${config.trailingSlash ? 'translate-x-5' : ''}`} />
-                                </button>
-                            </div>
+                            <input
+                                type="range" min="1" max="15" step="1"
+                                value={config.maxDepth}
+                                onChange={(e) => setConfig({...config, maxDepth: parseInt(e.target.value)})}
+                                className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                            />
                         </div>
                     </div>
 
-                    {/* 3. 排除项设置 */}
-                    <div className="space-y-3">
-                        <div className="flex items-center justify-between">
-                            <label className="block text-sm font-semibold text-slate-700 uppercase tracking-wider">
-                                3. 排除名单
-                            </label>
-                            <button onClick={clearHistory} title="恢复默认" className="text-slate-400 hover:text-red-500 transition-colors">
-                                <RefreshCw size={14} />
-                            </button>
-                        </div>
+                    {/* 3. 开关选项 */}
+                    <div className="space-y-1 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                        <Toggle label="显示文件" checked={config.showFiles} onChange={v => setConfig({...config, showFiles: v})} />
+                        <Toggle label="显示大小 (KB)" checked={config.showSizes} onChange={v => setConfig({...config, showSizes: v})} />
+                        <Toggle label="文件夹尾部斜杠 (/)" checked={config.trailingSlash} onChange={v => setConfig({...config, trailingSlash: v})} />
+                        <Toggle label="显示统计信息" checked={config.showStats} onChange={v => setConfig({...config, showStats: v})} />
+                    </div>
 
-                        <div className="flex gap-2">
+                    {/* 4. 排除设置 */}
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">排除名单</label>
+                        <div className="flex gap-1">
                             <input
                                 type="text"
                                 value={ignoreInput}
-                                onChange={(e) => setIgnoreInput(e.target.value)}
-                                onKeyDown={handleKeyDown}
-                                placeholder="输入名称并回车 (如 dist)"
-                                className="flex-1 px-3 py-2 text-sm border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                onChange={e => setIgnoreInput(e.target.value)}
+                                onKeyDown={e => e.key === 'Enter' && setConfig(c => ({...c, ignores: [...c.ignores, ignoreInput] }) || setIgnoreInput(''))}
+                                placeholder="添加目录 (如 test)..."
+                                className="flex-1 px-2 py-1.5 text-sm border border-slate-200 rounded focus:border-blue-500 focus:outline-none"
                             />
                             <button
-                                onClick={addIgnore}
-                                className="bg-slate-100 text-slate-600 p-2 rounded-md hover:bg-slate-200"
+                                onClick={() => { if(ignoreInput) { setConfig(c => ({...c, ignores: [...c.ignores, ignoreInput] })); setIgnoreInput(''); }}}
+                                className="bg-slate-100 px-3 rounded text-slate-600 hover:bg-slate-200"
                             >
-                                <Plus size={18} />
+                                <Plus size={16} />
                             </button>
                         </div>
-
-                        <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto">
+                        <div className="flex flex-wrap gap-1.5 mt-2">
                             {config.ignores.map(item => (
-                                <span key={item} className="inline-flex items-center gap-1 px-2 py-1 bg-red-50 text-red-700 text-xs rounded-full border border-red-100 group">
+                                <span key={item} className="inline-flex items-center gap-1 px-2 py-0.5 bg-white border border-slate-200 text-slate-600 text-xs rounded hover:border-red-300 group transition-colors">
                   {item}
-                                    <button onClick={() => removeIgnore(item)} className="hover:text-red-900">
+                                    <button onClick={() => setConfig(c => ({...c, ignores: c.ignores.filter(i => i !== item)}))} className="text-slate-400 group-hover:text-red-500">
                     <Trash2 size={10} />
                   </button>
                 </span>
@@ -427,95 +456,99 @@ export default function App() {
                     </div>
 
                 </div>
-
-                <div className="p-4 border-t border-slate-100 bg-slate-50 text-xs text-center text-slate-400">
-                    Settings saved automatically
-                </div>
             </div>
 
-            {/* 右侧展示区域 */}
-            <div className="flex-1 flex flex-col h-screen overflow-hidden bg-slate-50/50">
+            {/* 右侧预览区 */}
+            <div className="flex-1 flex flex-col min-w-0 bg-slate-100">
 
                 {/* Toolbar */}
-                <div className="h-16 border-b border-slate-200 bg-white flex items-center justify-between px-6 shadow-sm z-10">
-                    <div className="flex items-center gap-2 text-slate-500">
-                        {files.length === 0 ? (
-                            <span className="flex items-center gap-2"><FileText size={16}/> 等待文件导入...</span>
+                <div className="h-14 bg-white border-b border-slate-200 flex items-center justify-between px-4 shadow-sm z-10">
+                    <div className="flex items-center gap-4 min-w-0">
+                        {isGenerating ? (
+                            <div className="flex items-center gap-2 text-blue-600 bg-blue-50 px-3 py-1.5 rounded-full text-sm font-medium animate-pulse">
+                                <Loader2 className="animate-spin" size={16} />
+                                <span>Generating...</span>
+                                <button onClick={stopGeneration} className="ml-2 bg-white text-red-500 text-xs px-2 py-0.5 rounded border border-blue-100 hover:bg-red-50 hover:border-red-200">
+                                    停止
+                                </button>
+                            </div>
                         ) : (
-                            <span className="flex items-center gap-2 text-slate-800 font-medium"><FileText size={16}/> 预览生成结果</span>
+                            <div className="flex items-center gap-4 text-slate-500 text-sm">
+                                {config.showStats && fileList.length > 0 && (
+                                    <>
+                                        <span className="flex items-center gap-1"><Folder size={14} /> {stats.dirs} 文件夹</span>
+                                        <span className="flex items-center gap-1"><FileText size={14} /> {stats.files} 文件</span>
+                                        <span className="flex items-center gap-1"><HardDrive size={14} /> {formatSize(stats.totalSize)}</span>
+                                    </>
+                                )}
+                            </div>
                         )}
                     </div>
 
-                    <div className="flex gap-3">
+                    <div className="flex gap-2">
+                        <button
+                            onClick={downloadFile}
+                            disabled={!generatedTree}
+                            className="p-2 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                            title="下载 .txt"
+                        >
+                            <Download size={18} />
+                        </button>
                         <button
                             onClick={copyToClipboard}
                             disabled={!generatedTree}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all shadow-sm ${
+                            className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all shadow-sm ${
                                 isCopied
                                     ? 'bg-green-600 text-white shadow-green-200'
-                                    : generatedTree
-                                        ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200 hover:shadow-md'
-                                        : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                                    : 'bg-slate-800 text-white hover:bg-slate-900 shadow-slate-300'
                             }`}
                         >
-                            {isCopied ? <span className="flex items-center gap-2">已复制!</span> : <><Copy size={16}/> 复制文本</>}
+                            {isCopied ? '已复制!' : <><Copy size={16}/> 复制结果</>}
                         </button>
                     </div>
                 </div>
 
-                {/* Code Editor Area */}
-                <div className="flex-1 p-6 overflow-hidden relative">
-                    <div className="absolute inset-0 m-6 bg-slate-900 rounded-xl shadow-2xl flex flex-col overflow-hidden border border-slate-800">
-                        {/* Fake Mac Toolbar */}
-                        <div className="h-9 bg-slate-800 flex items-center px-4 gap-2 select-none border-b border-slate-700">
-                            <div className="w-3 h-3 rounded-full bg-red-500" />
-                            <div className="w-3 h-3 rounded-full bg-yellow-500" />
-                            <div className="w-3 h-3 rounded-full bg-green-500" />
-                            <span className="ml-4 text-xs text-slate-400 font-mono opacity-60">tree_output.txt</span>
+                {/* Editor Area */}
+                <div className="flex-1 p-4 md:p-6 overflow-hidden relative flex flex-col">
+                    <div className="flex-1 bg-[#1e1e1e] rounded-xl shadow-2xl overflow-hidden flex flex-col border border-slate-700/50">
+                        {/* Mac Toolbar */}
+                        <div className="h-8 bg-[#2d2d2d] flex items-center px-4 gap-2 border-b border-black/20 shrink-0">
+                            <div className="w-2.5 h-2.5 rounded-full bg-[#ff5f56]" />
+                            <div className="w-2.5 h-2.5 rounded-full bg-[#ffbd2e]" />
+                            <div className="w-2.5 h-2.5 rounded-full bg-[#27c93f]" />
+                            <span className="ml-3 text-xs text-zinc-500 font-mono">
+                 {rootName}.{config.style === 'json' ? 'json' : 'txt'}
+               </span>
                         </div>
 
-                        <div className="flex-1 overflow-auto p-4 custom-scrollbar">
-                            {files.length === 0 ? (
-                                <div className="h-full flex flex-col items-center justify-center text-slate-600 opacity-40">
-                                    <Code size={64} className="mb-4" />
-                                    <p className="text-lg">在左侧选择一个文件夹以开始</p>
-                                    <p className="text-sm">Folder path structure will appear here</p>
+                        <div className="flex-1 overflow-auto p-4 custom-scrollbar relative">
+                            {!fileList.length ? (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-600 opacity-30 select-none">
+                                    <Code size={80} strokeWidth={1} />
+                                    <p className="mt-4 text-xl font-light">等待导入项目...</p>
                                 </div>
                             ) : (
-                                <pre className="font-mono text-sm leading-relaxed text-slate-300 whitespace-pre">
+                                <pre className="font-mono text-sm leading-6 text-zinc-300 whitespace-pre font-ligatures-none">
                    {generatedTree}
                  </pre>
                             )}
                         </div>
 
-                        {/* Stats Footer */}
-                        {generatedTree && (
-                            <div className="h-8 bg-slate-800 border-t border-slate-700 flex items-center justify-between px-4 text-xs text-slate-500 font-mono">
-                                <span>Lines: {generatedTree.split('\n').length}</span>
-                                <span>Chars: {generatedTree.length}</span>
-                                <span>Format: {config.style}</span>
-                            </div>
-                        )}
+                        {/* Footer Status */}
+                        <div className="h-7 bg-[#007acc] text-white flex items-center px-3 text-[10px] justify-between shrink-0">
+                            <span>UTF-8</span>
+                            <span>{config.style.toUpperCase()} MODE</span>
+                        </div>
                     </div>
                 </div>
             </div>
 
             <style>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 10px;
-          height: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: #1e293b;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #475569;
-          border-radius: 5px;
-          border: 2px solid #1e293b;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #64748b;
-        }
+        .custom-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .font-ligatures-none { font-variant-ligatures: none; }
       `}</style>
         </div>
     );
